@@ -1,0 +1,8 @@
+[package]
+name = "par_bbox"
+version = "0.1.0"
+authors = ["Jacob Wasserman <jwasserman@gmail.com>"]
+
+[dependencies]
+geojson = "0.9.0"
+time = "*"
