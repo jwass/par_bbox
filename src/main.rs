@@ -1,4 +1,5 @@
 extern crate geojson;
+extern crate rayon;
 extern crate time;
 
 use std::error::Error;
@@ -116,19 +117,18 @@ impl ToBbox for Value {
 fn multipolygon_bbox(mp: &[Vec<Vec<Position>>]) -> Bbox {
     match mp.len() {
         0 => panic!("No positions!"),
-    
-        // When there's only one MultiPolygon, extract its outer ring and
-        // return its bounding box
-        1 => mp[0][0].to_bbox(),
+        1 => mp[0].to_bbox(),
         _ => {
             let midpoint = mp.len() / 2;
             let (left, right) = mp.split_at(midpoint);
-            multipolygon_bbox(left).merge(&multipolygon_bbox(right))
+            let (left_bbox, right_bbox) = rayon::join(|| multipolygon_bbox(left), || multipolygon_bbox(right));
+            left_bbox.merge(&right_bbox)
+            //multipolygon_bbox(left).merge(&multipolygon_bbox(right))
         }
     }
 }
 
-impl<T: ToBbox> ToBbox for [T] {
+impl<T: ToBbox + Sync> ToBbox for [T] {
     fn to_bbox(&self) -> Bbox { 
         match self.len() {
             0 => panic!("No positions!"),
@@ -136,7 +136,9 @@ impl<T: ToBbox> ToBbox for [T] {
             _ => {
                 let midpoint = self.len() / 2;
                 let (left, right) = self.split_at(midpoint);
-                left.to_bbox().merge(&right.to_bbox())
+                let (left_bbox, right_bbox) = rayon::join(|| left.to_bbox(), ||right.to_bbox());
+                left_bbox.merge(&right_bbox)
+                //left.to_bbox().merge(&right.to_bbox())
             }
         }
     }
@@ -151,7 +153,9 @@ impl ToBbox for [Vec<Position>] {
             _ => {
                 let midpoint = self.len() / 2;
                 let (left, right) = self.split_at(midpoint);
-                left.to_bbox().merge(&right.to_bbox())
+                let (left_bbox, right_bbox) = rayon::join(|| left.to_bbox(), ||right.to_bbox());
+                left_bbox.merge(&right_bbox)
+                //left.to_bbox().merge(&right.to_bbox())
             }
         }
     }
@@ -186,14 +190,16 @@ fn main() {
     let mut data = String::new();
 
     let start = PreciseTime::now();
+    println!("Reading file");
     file.read_to_string(&mut data).unwrap();
+    println!("Parsing JSON");
     let geojson : GeoJson = data.parse().unwrap();
     let end_parsed = PreciseTime::now();
+    println!("Parsed.");
 
     let total_bbox = geojson.to_bbox();
     let end_bbox = PreciseTime::now();
 
-    //println!("Number of points {}", n_point(&geojson));
     println!("Total bbox: {:?}", total_bbox);
     println!("Time to parse: {}", start.to(end_parsed).num_microseconds().unwrap() as f64 * 1e-6);
     println!("Time to bbox: {:?}", end_parsed.to(end_bbox).num_microseconds().unwrap() as f64 * 1e-6)
