@@ -21,6 +21,7 @@ struct Bbox {
 
 
 impl Bbox {
+    // Ignore antimeridian crossings for now
     pub fn merge(&self, other: &Bbox) -> Self {
         Bbox {
             xmin: self.xmin.min(other.xmin),
@@ -52,14 +53,18 @@ impl ToBbox for Geometry {
 
 
 impl ToBbox for Feature {
+    // A Feature's bounding box is the bounding box of its geometry. We assume
+    // features will have a geometry, even though it is technically optional.
     fn to_bbox(&self) -> Bbox { self.geometry.as_ref().unwrap().to_bbox() }
 }
 
 
 impl ToBbox for FeatureCollection {
-    // Because we impl ToBbox for Feature, this takes advantage of
-    // `impl<T: ToBbox> ToBbox for [T]`
-    fn to_bbox(&self) -> Bbox { self.features.to_bbox() }
+    // Recursively split up the feature collection's bounding box into the
+    // bounding box of the individual features.
+    fn to_bbox(&self) -> Bbox {
+        compute_bbox(&self.features, &|ref f| f.to_bbox())
+    }
 }
 
 
@@ -74,89 +79,71 @@ impl ToBbox for GeoJson {
 }
 
 
+// This is a helper function that we use a bunch below in the bounding box
+// calculation of each geometry type.
+fn position_bbox(p: &Position) -> Bbox { p.to_bbox() }
+
+
 impl ToBbox for Value {
     fn to_bbox(&self) -> Bbox {
         match *self {
-            // Point is GeoJson::Position
-            // `impl ToBbox for Position { fn to_bbox(...) ... }`
+            // Point is GeoJson::Position or Vec<f64> which is
+            // a [longitude,latitude] pair
             Value::Point(ref p) => p.to_bbox(),
 
             // MultiPoint is Vec<Position>
-            // `impl<T: ToBbox> ToBbox for [T]`
-            Value::MultiPoint(ref vp) => vp.to_bbox(),
+            // Break up the MultiPoint into smaller MultiPoints until we get
+            // to a single Position value, then use position_bbox to return
+            // the single position's value and combine back up the chain.
+            Value::MultiPoint(ref vp) => compute_bbox(vp, &position_bbox),
 
             // LineString is Vec<Position>
-            // `impl<T: ToBbox> ToBbox for [T]`
-            Value::LineString(ref vp) => vp.to_bbox(),
+            Value::LineString(ref vp) => compute_bbox(vp, &position_bbox),
 
             // MultiLineString is Vec<Vec<Position>>
-            // `impl ToBbox for [Vec<Position>]`
-            Value::MultiLineString(ref vvp) => vvp.to_bbox(),
+            Value::MultiLineString(ref vvp) => compute_bbox(vvp, &|ref vp| compute_bbox(vp, &position_bbox)),
 
             // Polygon is Vec<Vec<Position>>. The first element is the outer
             // ring / exterior of the polygon which we use to compute the
             // bounding box of the total polygon.  Extract the first element
-            // (which looks like a LineString) and return its bounding box.
-            // `impl<T: ToBbox> ToBbox for [T]`
-            Value::Polygon(ref vvp) => vvp[0].to_bbox(),
+            // (which is like a LineString) and return its bounding box.
+            Value::Polygon(ref vvp) => compute_bbox(&vvp[0], &position_bbox),
 
-            // MultiPolygon is Vec<Vec<Vec<Position>>>, a Vec of
-            // Polygon objects. multipolygon_bbox recursively splits
-            // them up pulling out the exterior of each polygon and
-            // computing the merged final bbox.
-            Value::MultiPolygon(ref vvvp) => multipolygon_bbox(vvvp),
+            // MultiPolygon is Vec<Vec<Vec<Position>>>, a Vec of polygon
+            // coordinates. When we get to an individual polygon, just use its
+            // outer ring like the Polygon code above.
+            Value::MultiPolygon(ref vvvp) => compute_bbox(vvvp, &|ref vvp| compute_bbox(&vvp[0], &position_bbox)),
 
             // GeometryCollection is Vec<Geometry>.
-            // impl<T: ToBbox> ToBbox for [T]
-            Value::GeometryCollection(ref geoms) => geoms.to_bbox(),
+            Value::GeometryCollection(ref geoms) => compute_bbox(geoms, &|ref g| g.to_bbox()),
         }
     }
 }
 
 
-fn multipolygon_bbox(mp: &[Vec<Vec<Position>>]) -> Bbox {
-    match mp.len() {
+// Divide and conquer approach for computing bounding boxes.  This relies on
+// the fact that the bounding box of an array of objects is the merged
+// bounding box of the first half of the array with the bounding box of the
+// second half of the array. We recursively split up the array until we
+// compute the bounding box of a single element, and the combining the
+// bounding boxes to compute the overall bounding box. Computing the bounding
+// box of the individual elements are broken down the same way until we reach
+// a single coordinate (Position) pair.  The final process may have varying
+// levels of nesting depending on the structure of the data.  `func` is
+// supplied to compute the bounding box of a single value. We use different
+// behavior for the same type (such as Vec<Vec<Position>>) depending on the
+// geometry type (i.e., Polygon vs.  MultiLineString).
+fn compute_bbox<T, F>(v: &[T], func: &F) -> Bbox 
+    where F: Fn(&T) -> Bbox + Sync, T: Sync {
+    match v.len() {
         0 => panic!("No positions!"),
-        1 => mp[0].to_bbox(),
+        1 => func(&v[0]),
         _ => {
-            let midpoint = mp.len() / 2;
-            let (left, right) = mp.split_at(midpoint);
-            let (left_bbox, right_bbox) = rayon::join(|| multipolygon_bbox(left), || multipolygon_bbox(right));
+            let mid = v.len() / 2;
+            let (left, right) = v.split_at(mid);
+            let (left_bbox, right_bbox) = rayon::join(|| compute_bbox(left,
+func), || compute_bbox(right, func));
             left_bbox.merge(&right_bbox)
-            //multipolygon_bbox(left).merge(&multipolygon_bbox(right))
-        }
-    }
-}
-
-impl<T: ToBbox + Sync> ToBbox for [T] {
-    fn to_bbox(&self) -> Bbox { 
-        match self.len() {
-            0 => panic!("No positions!"),
-            1 => self[0].to_bbox(),
-            _ => {
-                let midpoint = self.len() / 2;
-                let (left, right) = self.split_at(midpoint);
-                let (left_bbox, right_bbox) = rayon::join(|| left.to_bbox(), ||right.to_bbox());
-                left_bbox.merge(&right_bbox)
-                //left.to_bbox().merge(&right.to_bbox())
-            }
-        }
-    }
-}
-
-
-impl ToBbox for [Vec<Position>] {
-    fn to_bbox(&self) -> Bbox { 
-        match self.len() {
-            0 => panic!("No positions!"),
-            1 => self[0].to_bbox(),
-            _ => {
-                let midpoint = self.len() / 2;
-                let (left, right) = self.split_at(midpoint);
-                let (left_bbox, right_bbox) = rayon::join(|| left.to_bbox(), ||right.to_bbox());
-                left_bbox.merge(&right_bbox)
-                //left.to_bbox().merge(&right.to_bbox())
-            }
         }
     }
 }
@@ -165,14 +152,14 @@ impl ToBbox for [Vec<Position>] {
 // Open the file specified on the command line.
 // Bail if we're not called correctly or can't open the file.
 fn get_file_or_fail() -> File {
-    let mut args : Vec<String> = env::args().collect();
+    let args : Vec<String> = env::args().collect();
     if args.len() != 2 {
         println!("Usage: $par_bbox /path/to/file.geojson");
         std::process::exit(1);
     }
 
-    let filename = args.remove(1);
-    match File::open(filename.clone()) {
+    let filename = &args[1];
+    match File::open(&filename) {
         Ok(f) => f,
         Err(e) => {
             println!("Could not open '{}': {}", filename, e.description());
@@ -199,7 +186,7 @@ fn main() {
 
     let total_bbox = geojson.to_bbox();
     let end_bbox = PreciseTime::now();
-
+ 
     println!("Total bbox: {:?}", total_bbox);
     println!("Time to parse: {}", start.to(end_parsed).num_microseconds().unwrap() as f64 * 1e-6);
     println!("Time to bbox: {:?}", end_parsed.to(end_bbox).num_microseconds().unwrap() as f64 * 1e-6)
