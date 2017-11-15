@@ -38,5 +38,5 @@ likely has little practical value.
 
 See Also
 --------
-[Rust Geo] (https://crates.io/crates/geo) - which contains a more
+[Rust Geo](https://crates.io/crates/geo) - which contains a more
 straightforward bounding box algorithm.
