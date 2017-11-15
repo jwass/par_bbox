@@ -12,7 +12,8 @@ coordinate point.
 
 For example, to compute the bounding box of a FeatureCollection, we combine
 the bounding boxes of the two halves of its Features array. The bounding box
-of each Feature geometry is similarly split. For example, a MultiLineString
+of each Feature geometry is similarly split. Different geometry types have different levels of nesting.
+For example, a MultiLineString
 will be split until we have a single LineString. That LineString will then be
 broken down until we compute the bounding box of just a single Position
 ([longitude, latitude]). The bounding boxes are then combined up the call
