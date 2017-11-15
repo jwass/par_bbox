@@ -19,6 +19,7 @@ broken down until we compute the bounding box of just a single Position
 ([longitude, latitude]). The bounding boxes are then combined up the call
 stack to return a single bounding box.
 
+Any contributions, suggestions or advice are more than welcome.
 
 Usage
 -----
